@@ -2,20 +2,31 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, CheckCircle2, FileText, Plus, Save, Trash2 } from "lucide-react";
 
 import { createEmployee, getNextEmployeeCode, updateEmployee } from "@/lib/api/hrmEmployeesApi";
 import { getBranches, getDepartments, getDesignations, getSetupOptions, getShifts } from "@/lib/api/hrmSetupApi";
 import { formatLabel, formatMoney } from "@/components/hrm/hrmUi";
+import {
+  digitsRegex,
+  getApiErrorMessage,
+  hasUnsafeInput,
+  safeCodeRegex,
+  safeNameRegex,
+  safeSimpleTextRegex,
+  safeTextRegex,
+  sanitizeSafeCode,
+  sanitizeSafeName,
+  sanitizeSafeText,
+} from "@/components/hrm/hrmValidation";
 
 const steps = ["Personal", "Employment", "Contact", "Banking", "Hours & Rates", "Documents"];
-const nameRegex = /^[A-Za-z][A-Za-z ]*$/;
-const textRegex = /^[A-Za-z0-9][A-Za-z0-9 ,.'/#-]*$/;
-const simpleTextRegex = /^[A-Za-z0-9][A-Za-z0-9 ]*$/;
+const nameRegex = safeNameRegex;
+const textRegex = safeTextRegex;
+const simpleTextRegex = safeSimpleTextRegex;
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const alphaNumRegex = /^[A-Za-z0-9-]+$/;
-const digitsRegex = /^[0-9]+$/;
+const alphaNumRegex = safeCodeRegex;
 
 const fallbackDocumentTypes = [
   "National Identity Card",
@@ -71,8 +82,25 @@ const initialForm = {
   document_items: [{ document_type: "", file_name: "" }],
 };
 
+const stepFields = [
+  ["first_name", "last_name", "call_name", "date_of_birth", "nic_or_passport", "biometric_employee_id"],
+  ["date_of_joining", "branch_id", "department_id", "designation_id", "employment_type_id", "employment_type", "shift_id"],
+  ["email", "phone", "address", "emergency_contact_name", "emergency_contact_phone"],
+  ["bank_name", "bank_branch", "account_holder_name", "account_number"],
+  ["basic_salary", "hourly_rate", "epf_number", "tax_number"],
+  ["document_items", "document_notes"],
+];
+
+const fieldStepMap = stepFields.reduce((map, fields, stepIndex) => {
+  fields.forEach((field) => {
+    map[field] = stepIndex;
+  });
+  return map;
+}, {});
+
 export default function EmployeeForm({ mode = "create", employeeId, initialEmployee }) {
   const router = useRouter();
+  const formTopRef = useRef(null);
   const [activeStep, setActiveStep] = useState(0);
   const [form, setForm] = useState(initialForm);
   const [errors, setErrors] = useState({});
@@ -117,6 +145,7 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
 
   function update(name, value) {
     const nextValue = sanitizeValue(name, value);
+    setMessage("");
     setForm((current) => {
       const next = { ...current, [name]: nextValue };
       if (name === "branch_id") {
@@ -155,6 +184,7 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
   }
 
   function updateDocument(index, field, value) {
+    setMessage("");
     setForm((current) => {
       const nextDocuments = [...current.document_items];
       nextDocuments[index] = { ...nextDocuments[index], [field]: value };
@@ -177,30 +207,32 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
     }));
   }
 
-  function validateAll() {
+  function buildValidationErrors() {
     const nextErrors = {};
-    requirePattern(nextErrors, "first_name", form.first_name, nameRegex, "First name is required and must contain letters only.");
-    requirePattern(nextErrors, "last_name", form.last_name, nameRegex, "Last name is required and must contain letters only.");
-    optionalPattern(nextErrors, "call_name", form.call_name, nameRegex, "Call name must contain letters only.");
+    requirePattern(nextErrors, "first_name", form.first_name, nameRegex, "First name can contain letters, spaces, apostrophes, and hyphens.");
+    requirePattern(nextErrors, "last_name", form.last_name, nameRegex, "Last name can contain letters, spaces, apostrophes, and hyphens.");
+    optionalPattern(nextErrors, "call_name", form.call_name, nameRegex, "Call name can contain letters, spaces, apostrophes, and hyphens.");
     if (!form.date_of_birth) nextErrors.date_of_birth = "Date of birth is required.";
     if (form.date_of_birth && new Date(form.date_of_birth) >= new Date()) nextErrors.date_of_birth = "Date of birth must be in the past.";
-    optionalPattern(nextErrors, "nic_or_passport", form.nic_or_passport, alphaNumRegex, "NIC/passport can contain only letters and numbers.");
+    optionalPattern(nextErrors, "nic_or_passport", form.nic_or_passport, alphaNumRegex, "NIC/passport can contain only letters, numbers, and hyphens.");
     optionalPattern(nextErrors, "biometric_employee_id", form.biometric_employee_id, alphaNumRegex, "Biometric ID can contain only letters, numbers, and hyphen.");
     if (!form.date_of_joining) nextErrors.date_of_joining = "Date of joining is required.";
-    if (!form.branch_id) nextErrors.branch_id = "Branch is required.";
-    if (!form.department_id) nextErrors.department_id = "Department is required.";
-    if (!form.designation_id) nextErrors.designation_id = "Designation is required.";
+    if (form.date_of_joining && form.date_of_joining < minDate) nextErrors.date_of_joining = "Date of joining is not valid.";
+    if (!form.branch_id) nextErrors.branch_id = "Please select a branch.";
+    if (!form.department_id) nextErrors.department_id = "Please select a department.";
+    if (!form.designation_id) nextErrors.designation_id = "Please select a designation.";
+    if (setup.employmentTypes.length && !form.employment_type_id) nextErrors.employment_type_id = "Please select an employment type.";
     if (!emailRegex.test(form.email)) nextErrors.email = "Enter a valid email address.";
     requirePattern(nextErrors, "phone", form.phone, digitsRegex, "Contact number must be exactly 10 digits.");
     if (form.phone.length !== 10) nextErrors.phone = "Contact number must be exactly 10 digits.";
-    requirePattern(nextErrors, "address", form.address, textRegex, "Address is required and must be 100 characters or fewer.");
+    requirePattern(nextErrors, "address", form.address, textRegex, "Address is required and contains unsupported characters.");
     if (form.address.length > 100) nextErrors.address = "Address cannot exceed 100 characters.";
-    requirePattern(nextErrors, "emergency_contact_name", form.emergency_contact_name, nameRegex, "Emergency contact name is required and must contain letters only.");
+    requirePattern(nextErrors, "emergency_contact_name", form.emergency_contact_name, nameRegex, "Emergency contact name can contain letters, spaces, apostrophes, and hyphens.");
     requirePattern(nextErrors, "emergency_contact_phone", form.emergency_contact_phone, digitsRegex, "Emergency contact number must be exactly 10 digits.");
     if (form.emergency_contact_phone.length !== 10) nextErrors.emergency_contact_phone = "Emergency contact number must be exactly 10 digits.";
-    optionalPattern(nextErrors, "bank_name", form.bank_name, nameRegex, "Bank name must contain letters only.");
-    optionalPattern(nextErrors, "account_holder_name", form.account_holder_name, nameRegex, "Account holder name must contain letters only.");
-    optionalPattern(nextErrors, "bank_branch", form.bank_branch, simpleTextRegex, "Bank branch can contain only letters, numbers, and spaces.");
+    optionalPattern(nextErrors, "bank_name", form.bank_name, nameRegex, "Bank name can contain letters, spaces, apostrophes, and hyphens.");
+    optionalPattern(nextErrors, "account_holder_name", form.account_holder_name, nameRegex, "Account holder name can contain letters, spaces, apostrophes, and hyphens.");
+    optionalPattern(nextErrors, "bank_branch", form.bank_branch, simpleTextRegex, "Bank branch contains unsupported characters.");
     optionalPattern(nextErrors, "account_number", form.account_number, digitsRegex, "Account number must contain numbers only.");
     if (form.account_number && form.account_number.length < 6) nextErrors.account_number = "Account number must be at least 6 digits.";
     if (form.basic_salary && Number(form.basic_salary) < 0) nextErrors.basic_salary = "Salary cannot be negative.";
@@ -211,29 +243,64 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
     if (filledDocuments.some((item) => !item.document_type || !item.file_name)) {
       nextErrors.document_items = "Each added document needs both document type and file.";
     }
-    setErrors(nextErrors);
-    return Object.keys(nextErrors).length === 0;
+    if (filledDocuments.some((item) => hasUnsafeInput(item.document_type) || hasUnsafeInput(item.file_name))) {
+      nextErrors.document_items = "Document details contain unsupported characters.";
+    }
+    if (form.document_notes && hasUnsafeInput(form.document_notes)) {
+      nextErrors.document_notes = "Document notes contain unsupported characters.";
+    }
+    return nextErrors;
   }
 
-  function validateStep() {
-    if (activeStep === 0) {
-      const currentErrors = {};
-      requirePattern(currentErrors, "first_name", form.first_name, nameRegex, "First name is required and must contain letters only.");
-      requirePattern(currentErrors, "last_name", form.last_name, nameRegex, "Last name is required and must contain letters only.");
-      if (!form.date_of_birth) currentErrors.date_of_birth = "Date of birth is required.";
-      setErrors((existing) => ({ ...existing, ...currentErrors }));
-      return Object.keys(currentErrors).length === 0;
-    }
-    if (activeStep === 1) {
-      const currentErrors = {};
-      if (!form.date_of_joining) currentErrors.date_of_joining = "Date of joining is required.";
-      if (!form.branch_id) currentErrors.branch_id = "Branch is required.";
-      if (!form.department_id) currentErrors.department_id = "Department is required.";
-      if (!form.designation_id) currentErrors.designation_id = "Designation is required.";
-      setErrors((existing) => ({ ...existing, ...currentErrors }));
-      return Object.keys(currentErrors).length === 0;
+  function errorsForStep(nextErrors, stepIndex) {
+    return Object.fromEntries(
+      Object.entries(nextErrors).filter(([field]) => fieldStepMap[field] === stepIndex)
+    );
+  }
+
+  function firstErrorStep(nextErrors) {
+    const firstField = Object.keys(nextErrors).find((field) => fieldStepMap[field] !== undefined);
+    return firstField ? fieldStepMap[firstField] : 0;
+  }
+
+  function scrollToFormTop() {
+    window.setTimeout(() => {
+      formTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      formTopRef.current?.focus?.();
+    });
+  }
+
+  function showErrorsOnStep(stepIndex) {
+    setActiveStep(stepIndex);
+    scrollToFormTop();
+  }
+
+  function validateStepByIndex(stepIndex) {
+    const nextErrors = buildValidationErrors();
+    const currentStepErrors = errorsForStep(nextErrors, stepIndex);
+    setErrors((existing) => {
+      const cleaned = Object.fromEntries(
+        Object.entries(existing).filter(([field]) => fieldStepMap[field] !== stepIndex)
+      );
+      return { ...cleaned, ...currentStepErrors };
+    });
+    if (Object.keys(currentStepErrors).length) {
+      scrollToFormTop();
+      return false;
     }
     return true;
+  }
+
+  function validateAllSteps() {
+    const nextErrors = buildValidationErrors();
+    setErrors(nextErrors);
+    const errorFields = Object.keys(nextErrors);
+    if (!errorFields.length) {
+      return true;
+    }
+    const stepIndex = firstErrorStep(nextErrors);
+    showErrorsOnStep(stepIndex);
+    return false;
   }
 
   function toPayload() {
@@ -248,12 +315,24 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
     return payload;
   }
 
+  function applyBackendErrors(error, fallbackMessage) {
+    const backendErrors = mapBackendErrors(error?.details);
+    if (Object.keys(backendErrors).length) {
+      setErrors((existing) => ({ ...existing, ...backendErrors }));
+      const stepIndex = firstErrorStep(backendErrors);
+      showErrorsOnStep(stepIndex);
+      return;
+    }
+    setMessage(getApiErrorMessage(error, fallbackMessage));
+    scrollToFormTop();
+  }
+
   async function handleSubmit() {
     setMessage("");
     if (!isLastStep) {
       return;
     }
-    if (!validateAll()) return;
+    if (!validateAllSteps()) return;
     setSaving(true);
     try {
       if (mode === "edit") {
@@ -268,36 +347,51 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
         router.refresh();
       }
     } catch (err) {
-      setMessage(err.message || (mode === "edit" ? "Unable to update employee." : "Unable to create employee."));
+      applyBackendErrors(err, mode === "edit" ? "Unable to update employee." : "Unable to create employee.");
     } finally {
       setSaving(false);
     }
   }
 
   function nextStep() {
-    if (!validateStep()) return;
+    if (!validateStepByIndex(activeStep)) return;
     setActiveStep((current) => Math.min(current + 1, steps.length - 1));
   }
 
   return (
-    <div className="space-y-6">
+    <div ref={formTopRef} tabIndex={-1} className="space-y-6 outline-none">
       <div className="rounded-md border border-gray-200 bg-white p-4 shadow-sm">
         <div className="grid gap-2 rounded-md bg-gray-100 p-1 sm:grid-cols-2 lg:grid-cols-6">
-          {steps.map((step, index) => (
-            <button
-              key={step}
-              type="button"
-              onClick={() => setActiveStep(index)}
-              className={`flex items-center justify-center gap-2 rounded-md border px-3 py-3 text-sm font-semibold transition ${activeStep === index ? "border-accdoo-blue bg-accdoo-blueSoft text-accdoo-blue shadow-sm" : "border-gray-200 bg-white text-gray-500 hover:text-gray-950"}`}
-            >
-              <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs ${activeStep === index ? "bg-accdoo-blue text-white" : "bg-gray-100 text-gray-500"}`}>
-                {index + 1}
-              </span>
-              {step}
-            </button>
-          ))}
+          {steps.map((step, index) => {
+            const isActive = activeStep === index;
+            return (
+              <button
+                key={step}
+                type="button"
+                onClick={() => setActiveStep(index)}
+                className={`flex items-center justify-center gap-2 rounded-md border px-3 py-3 text-sm font-semibold transition ${
+                  isActive
+                    ? "border-accdoo-blue bg-accdoo-blueSoft text-accdoo-blue shadow-sm"
+                    : "border-gray-200 bg-white text-gray-500 hover:text-gray-950"
+                }`}
+              >
+                <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs ${
+                  isActive ? "bg-accdoo-blue text-white" : "bg-gray-100 text-gray-500"
+                }`}>
+                  {index + 1}
+                </span>
+                {step}
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {message && message.includes("successfully") ? (
+        <div className={`rounded-md border px-4 py-3 text-sm font-semibold ${message.includes("successfully") ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}>
+          {message}
+        </div>
+      ) : null}
 
       <div className="rounded-md border border-gray-200 bg-white p-6 shadow-sm">
         {activeStep === 0 ? <PersonalStep form={form} errors={activeStepErrors} update={update} /> : null}
@@ -317,12 +411,6 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
           />
         ) : null}
       </div>
-
-      {message ? (
-        <div className={`rounded-md border px-4 py-3 text-sm ${message.includes("successfully") ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}>
-          {message}
-        </div>
-      ) : null}
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Link href="/hrm/employees" className="inline-flex items-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
@@ -352,10 +440,10 @@ export default function EmployeeForm({ mode = "create", employeeId, initialEmplo
 
 function sanitizeValue(name, value) {
   if (["first_name", "last_name", "call_name", "bank_name", "account_holder_name", "emergency_contact_name"].includes(name)) {
-    return value.replace(/[^A-Za-z ]/g, "").replace(/\s{2,}/g, " ");
+    return sanitizeSafeName(value).slice(0, 150);
   }
   if (name === "bank_branch") {
-    return value.replace(/[^A-Za-z0-9 ]/g, "").replace(/\s{2,}/g, " ");
+    return sanitizeSafeText(value, 120);
   }
   if (["phone", "emergency_contact_phone"].includes(name)) {
     return value.replace(/\D/g, "").slice(0, 10);
@@ -364,10 +452,13 @@ function sanitizeValue(name, value) {
     return value.replace(/\D/g, "").slice(0, 24);
   }
   if (["nic_or_passport", "biometric_employee_id", "epf_number", "tax_number"].includes(name)) {
-    return value.replace(/[^A-Za-z0-9-]/g, "").slice(0, 80);
+    return sanitizeSafeCode(value, 80);
   }
   if (name === "address") {
-    return value.replace(/[^A-Za-z0-9 ,.'/#-]/g, "").slice(0, 100);
+    return sanitizeSafeText(value, 100);
+  }
+  if (name === "document_notes") {
+    return sanitizeSafeText(value, 1000);
   }
   if (["basic_salary", "hourly_rate"].includes(name)) {
     const cleaned = value.replace(/[^0-9.]/g, "");
@@ -394,14 +485,31 @@ function toFormState(employee) {
   };
 }
 
+function mapBackendErrors(details) {
+  if (!details) return {};
+  const mapped = {};
+  const items = Array.isArray(details) ? details : Object.entries(details).map(([field, message]) => ({ loc: [field], msg: message }));
+
+  items.forEach((item) => {
+    const loc = Array.isArray(item.loc) ? item.loc : [item.loc || item.field];
+    const cleanLoc = loc.filter(Boolean).filter((part) => part !== "body");
+    const field = cleanLoc[cleanLoc.length - 1];
+    if (!field || fieldStepMap[field] === undefined) return;
+    const message = typeof item.msg === "string" ? item.msg : String(item.message || item.detail || "Please enter a valid value.");
+    mapped[field] = message;
+  });
+
+  return mapped;
+}
+
 function requirePattern(errors, name, value, pattern, message) {
-  if (!value || !pattern.test(value.trim())) {
+  if (!value || hasUnsafeInput(value) || !pattern.test(value.trim())) {
     errors[name] = message;
   }
 }
 
 function optionalPattern(errors, name, value, pattern, message) {
-  if (value && !pattern.test(value.trim())) {
+  if (value && (hasUnsafeInput(value) || !pattern.test(value.trim()))) {
     errors[name] = message;
   }
 }

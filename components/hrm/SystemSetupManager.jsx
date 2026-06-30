@@ -13,6 +13,7 @@ import {
   deleteDesignation,
   deleteSetupOption,
   deleteShift,
+  getBranches,
   getDepartments,
   getDesignations,
   getSetupOptions,
@@ -23,6 +24,13 @@ import {
   updateShift,
 } from "@/lib/api/hrmSetupApi";
 import { colorPalette, colorValueFromText, initials, toneFromColor } from "@/components/hrm/hrmUi";
+import {
+  getApiErrorMessage,
+  hasUnsafeInput,
+  safeCodeRegex,
+  safeNameRegex,
+  safeTextRegex,
+} from "@/components/hrm/hrmValidation";
 
 const sections = [
   { id: "branches", label: "Branches", group: "Organization", icon: Building2, readOnly: true, description: "Physical locations where your business operates." },
@@ -39,6 +47,12 @@ const sections = [
 ];
 
 const blankForm = { name: "", code: "", branch_id: "", department_id: "", head_name: "", level: "", color: colorPalette[0].value, description: "", is_required: false, is_active: true, start_time: "", end_time: "", break_minutes: "0" };
+
+const fallbackBranches = [
+  { id: 1, name: "Head Office", type: "Head Office", city: "Colombo", employee_count: 0, status: "active", color: "#0B5CAB" },
+  { id: 2, name: "Kandy Branch", type: "Branch", city: "Kandy", employee_count: 0, status: "active", color: "#155DFC" },
+  { id: 3, name: "Galle Branch", type: "Branch", city: "Galle", employee_count: 0, status: "active", color: "#0F766E" },
+];
 
 export default function SystemSetupManager() {
   const [activeSection, setActiveSection] = useState("branches");
@@ -87,7 +101,8 @@ export default function SystemSetupManager() {
       if (departmentList.length) setDepartments(departmentList);
 
       if (sectionId === "branches") {
-        setRecords(await getBranches());
+        const branchList = await getBranches().catch(() => []);
+        setRecords(normalizeBranches(branchList.length ? branchList : fallbackBranches));
       }
       else if (sectionId === "departments") setRecords(departmentList);
       else if (sectionId === "designations") setRecords(await getDesignations());
@@ -130,6 +145,11 @@ export default function SystemSetupManager() {
   async function saveRecord(event) {
     event.preventDefault();
     setError("");
+    const validationMessage = validateSetupForm(activeSection, form);
+    if (validationMessage) {
+      setError(validationMessage);
+      return;
+    }
     setSaving(true);
     try {
       if (activeSection === "departments") {
@@ -159,7 +179,7 @@ export default function SystemSetupManager() {
       setForm(blankForm);
       await loadRecords(activeSection);
     } catch (err) {
-      setError(err.message || "Unable to save setup data");
+      setError(getApiErrorMessage(err, "Unable to save setup data"));
     } finally {
       setSaving(false);
     }
@@ -302,6 +322,44 @@ export default function SystemSetupManager() {
       ) : null}
     </div>
   );
+}
+
+function normalizeBranches(branches) {
+  return branches.map((branch) => ({
+    ...branch,
+    type: branch.type || branch.branch_type || "Branch",
+    status: branch.status || (branch.is_active === false ? "inactive" : "active"),
+    employee_count: branch.employee_count ?? branch.employeeCount ?? 0,
+  }));
+}
+
+function validateSetupForm(activeSection, form) {
+  const name = form.name.trim();
+  if (!name) return "Name is required.";
+  if (name.length > 120) return "This value is too long.";
+  if (hasUnsafeInput(name) || !safeTextRegex.test(name)) return "Name contains unsupported characters.";
+
+  if (form.code && (hasUnsafeInput(form.code) || !safeCodeRegex.test(form.code.trim()))) {
+    return "Code contains unsupported characters.";
+  }
+
+  if (form.head_name && (hasUnsafeInput(form.head_name) || !safeNameRegex.test(form.head_name.trim()))) {
+    return "Head name contains unsupported characters.";
+  }
+
+  if (form.level && (hasUnsafeInput(form.level) || !safeTextRegex.test(form.level.trim()))) {
+    return "Level contains unsupported characters.";
+  }
+
+  if (form.description && (form.description.length > 500 || hasUnsafeInput(form.description))) {
+    return "Description contains unsupported characters or is too long.";
+  }
+
+  if (activeSection === "shifts" && form.start_time && form.end_time && form.start_time === form.end_time) {
+    return "Shift start and end time cannot be the same.";
+  }
+
+  return "";
 }
 
 function SetupModal({ section, activeSection, form, setForm, departmentOptions, editing, saving, onClose, onSubmit }) {
